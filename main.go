@@ -151,9 +151,9 @@ func ProcessTGMsg(tg *telegram.BotAPI, irc *irc.Engine, update telegram.Update, 
 
 	id, ok := processResource(*tg, inch, update)
 	if ok {
-		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + msg.Text)
-	} else {
 		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + config.HttpServerString + id)
+	} else {
+		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + msg.Text)
 	}
 
 	for _, subid := range subscribers.Get() {

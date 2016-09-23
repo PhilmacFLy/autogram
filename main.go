@@ -1,27 +1,34 @@
 package main
 
 import (
-	telegram "github.com/go-telegram-bot-api/telegram-bot-api"
-	irc "github.com/quiteawful/qairc"
-	"fmt"
-	"crypto/tls"
-	"net/http"
-	"github.com/gorilla/mux"
-	"io/ioutil"
-	"github.com/urfave/cli"
-	"encoding/json"
-	"os"
 	"autogram-next/set"
-	"autogram-next/cacher"
+	"cacher"
+	"crypto/tls"
+	"encoding/json"
+	"github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/gorilla/mux"
+	"github.com/op/go-logging"
+	"github.com/quiteawful/qairc"
+	"github.com/urfave/cli"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"time"
 )
 
-var confpath string
-var config Settings
-var subscribers set.I64
+var (
+	telegram    *tgbotapi.BotAPI
+	irc         *qairc.Engine
+	confpath    string
+	config      Settings
+	subscribers set.I64
+	log         logging.Logger
+)
 
 type Settings struct {
 	ApiKey           string
 	IrcServer        string
+	IrcTLS           bool
 	IrcChannel       string
 	IrcNickname      string
 	IrcRealname      string
@@ -49,14 +56,22 @@ type File struct {
 	data []byte
 }
 
-func getPhoto(tg telegram.BotAPI, photos []telegram.PhotoSize) (*File, error) {
+func (f File) ID() string {
+	return f.id
+}
+
+func (f File) Score() int {
+	return len(f.data)
+}
+
+func getPhoto(photos []tgbotapi.PhotoSize) (*File, error) {
 	maxphoto := photos[0]
 	for _, photo := range photos {
 		if maxphoto.FileSize < photo.FileSize {
 			maxphoto = photo
 		}
 	}
-	return getFileByID(tg, maxphoto.FileID)
+	return getFileByID(maxphoto.FileID)
 }
 
 func downloadFile(url string) ([]byte, error) {
@@ -72,8 +87,8 @@ func downloadFile(url string) ([]byte, error) {
 	return contents, nil
 }
 
-func getFileByID(tg telegram.BotAPI, id string) (*File, error) {
-	url, err := tg.GetFileDirectURL(id)
+func getFileByID(id string) (*File, error) {
+	url, err := telegram.GetFileDirectURL(id)
 	if err != nil {
 		return nil, err
 	}
@@ -81,67 +96,54 @@ func getFileByID(tg telegram.BotAPI, id string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &File{id, len(content), content}, nil
+	return &File{
+		id:   id,
+		size: len(content),
+		data: content,
+	}, nil
 }
 
-func processResource(tg telegram.BotAPI, inch chan cacher.Entry, update telegram.Update) (string, bool) {
+func processResource(msg tgbotapi.Message) (string, bool) {
 	var file *File
 	var err error
 	switch {
-	case update.Message.Photo != nil:
-		file, err = getPhoto(tg, *update.Message.Photo)
-	case update.Message.Video != nil:
-		file, err = getFileByID(tg, (*update.Message.Video).FileID)
-	case update.Message.Sticker != nil:
-		file, err = getFileByID(tg, (*update.Message.Sticker).FileID)
-	case update.Message.Document != nil:
-		file, err = getFileByID(tg, (*update.Message.Document).FileID)
+	case msg.Photo != nil:
+		file, err = getPhoto(*msg.Photo)
+	case msg.Video != nil:
+		file, err = getFileByID((msg.Video).FileID)
+	case msg.Sticker != nil:
+		file, err = getFileByID((msg.Sticker).FileID)
+	case msg.Document != nil:
+		file, err = getFileByID((msg.Document).FileID)
 	default:
 		return "", false
 	}
 	panicOnError(err)
-	inch <- cacher.Entry{
-		ID: file.id,
-		Load: *file,
-	}
 	return file.id, true
 }
 
-func ProcessIRCMsg(tg *telegram.BotAPI, irc *irc.Engine, msg irc.Message) {
-	switch {
-	case msg.Type == "001":
-		irc.Join(config.IrcChannel)
-	case msg.IsPrivmsg() && msg.GetChannel() == config.IrcChannel:
-		for _, subid := range subscribers.Get() {
-			msgtext, _ := msg.GetPrivmsg()
-			_, err := tg.Send(
-				telegram.NewMessage(int64(subid), msg.Sender.Nick + ": " + msgtext),
-			)
-			if err != nil {
-				irc.Privmsg(config.IrcChannel, "Error: " + err.Error())
-			}
-		}
-	}
-}
+func processTGMsg(update tgbotapi.Update) {
 
-func ProcessTGMsg(tg *telegram.BotAPI, irc *irc.Engine, update telegram.Update, inch chan cacher.Entry) {
-	msg := update.Message
+	var (
+		msg tgbotapi.Message
+		edt string
+	)
+
 	switch {
-	case msg.Text == "/start":
+	case (update.Message) != nil:
+		msg = *update.Message
+		edt = ""
+	case (update.EditedMessage) != nil:
+		msg = *update.EditedMessage
+		edt = " (*edit*)"
+
+	}
+
+	if update.Message != nil && (msg.Text == "/start" || msg.Text == "/stop") {
 		switch {
-		case msg.Chat.IsPrivate():
-			subscribers.Put(int64(msg.From.ID))
-		case msg.Chat.IsGroup():
+		case msg.Text == "/start":
 			subscribers.Put(int64(msg.Chat.ID))
-		}
-		config.Subscribers = subscribers.Get()
-		config.SaveToJSONFile(confpath)
-		return
-	case msg.Text == "/stop":
-		switch {
-		case msg.Chat.IsPrivate():
-			subscribers.Remove(int64(msg.From.ID))
-		case msg.Chat.IsGroup():
+		case msg.Text == "/stop":
 			subscribers.Remove(int64(msg.Chat.ID))
 		}
 		config.Subscribers = subscribers.Get()
@@ -149,36 +151,33 @@ func ProcessTGMsg(tg *telegram.BotAPI, irc *irc.Engine, update telegram.Update, 
 		return
 	}
 
-	id, ok := processResource(*tg, inch, update)
+	id, ok := processResource(msg)
+
 	if ok {
-		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + config.HttpServerString + id)
+		irc.Privmsg(config.IrcChannel, msg.From.UserName+": "+edt+config.HttpServerString+id)
 	} else {
-		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + msg.Text)
+		irc.Privmsg(config.IrcChannel, msg.From.UserName+": "+edt+msg.Text)
 	}
 
 	for _, subid := range subscribers.Get() {
-		if subid != int64(msg.From.ID) && subid != int64(msg.Chat.ID) {
-			_, err := tg.Send(
-				telegram.NewForward(
+		if subid != int64(msg.From.ID) {
+			_, err := telegram.Send(
+				tgbotapi.NewForward(
 					subid,
-					int64(msg.From.ID),
+					int64(msg.Chat.ID),
 					msg.MessageID,
 				),
 			)
 			if err != nil {
-				reflectid := int64(msg.From.ID)
-				if msg.Chat.IsGroup() {
-					reflectid = int64(msg.Chat.ID)
-				}
-				tg.Send(
-					telegram.NewMessage(
+				reflectid := int64(msg.Chat.ID)
+				telegram.Send(
+					tgbotapi.NewMessage(
 						int64(reflectid),
-						"Error: " + err.Error(),
+						"Error: "+err.Error(),
 					),
 				)
 			}
 		}
-
 	}
 }
 
@@ -188,9 +187,113 @@ func panicOnError(err error) {
 	}
 }
 
+func tgannounce(msg string) {
+	for _, subid := range subscribers.Get() {
+		telegram.Send(tgbotapi.NewMessage(subid, msg))
+	}
+}
+
+func bot(c *cli.Context) error {
+	c
+	config.GetFromFile(confpath)
+	subscribers = set.I64{}
+	for _, sub := range config.Subscribers {
+		subscribers.Put(sub)
+	}
+
+	var err error
+	telegram, err = tgbotapi.NewBotAPI(config.ApiKey)
+	panicOnError(err)
+
+	updatecfg := tgbotapi.UpdateConfig{}
+	updatecfg.Timeout = 60
+	tgch, err := telegram.GetUpdatesChan(updatecfg)
+	panicOnError(err)
+
+	irc = qairc.QAIrc(config.IrcNickname, config.IrcRealname)
+	irc.Address = config.IrcServer
+	irc.UseTLS = config.IrcTLS
+	irc.TLSCfg = &tls.Config{InsecureSkipVerify: true}
+	err = irc.Run()
+	panicOnError(err)
+
+	cache := cacher.New(100*1024*1024, func(id string) (cacher.Entry, bool) {
+		log.Info("Cache miss:", "item id", id)
+		npic, err := getFileByID(id)
+		if err != nil {
+			log.Warning("Cache miss:", "item id", id, "backend retrieval unsuccessful")
+			data, _ := ioutil.ReadFile("giphy.gif")
+			return File{id: id, size: len(data), data: data}, false
+		}
+		log.Info("Cache miss:", "item id", id, "backend retrieval successful")
+		return *npic, true
+	})
+
+	r := mux.NewRouter()
+	r.HandleFunc("/autogramimg/{id}", func(rw http.ResponseWriter, rq *http.Request) {
+
+		log.Info("Http request:", rq.RemoteAddr, rq.RequestURI)
+		vars := mux.Vars(rq)
+
+		if vars["id"] == "favicon.ico" {
+			return
+		}
+		log.Info("Cache request:", "item id", vars["id"])
+		cacherq := cacher.EntryRq{
+			vars["id"],
+			make(chan cacher.Entry),
+		}
+		cache.RqCh <- cacherq
+		rw.Write((<-cacherq.Response).(File).data)
+	})
+
+	go func() {
+		err = http.ListenAndServe(config.HttpListen, r)
+		if err != nil {
+			log.Error("Http error:", err.Error())
+		}
+	}()
+
+	tgannounce("PSA: " + time.Now().String())
+	tgannounce("PSA: Autogram aktiv!")
+
+	for {
+		select {
+		case msg, state := <-irc.Out:
+			if !state {
+				log.Warning("IRC reconnect triggered")
+				irc.Reconnect()
+			}
+			switch {
+			case msg.Type == "001":
+				log.Info("Joining " + config.IrcChannel + " on " + config.IrcServer)
+				irc.Join(config.IrcChannel)
+			case msg.IsPrivmsg() && msg.GetChannel() == config.IrcChannel:
+				for _, subid := range subscribers.Get() {
+					msgtext, _ := msg.GetPrivmsg()
+					_, err := telegram.Send(
+						tgbotapi.NewMessage(int64(subid), msg.Sender.Nick+": "+msgtext),
+					)
+					if err != nil {
+						irc.Privmsg(config.IrcChannel, "Error: "+err.Error())
+					}
+				}
+			}
+
+		case tgin := <-tgch:
+			processTGMsg(tgin)
+		}
+	}
+}
+
 func main() {
-	fmt.Println("Running...")
-	fmt.Println("R04")
+	format := logging.MustStringFormatter(
+		`%{color}%{time:15:04:05.000} %{shortfunc} %{level:.4s} %{id:05x}%{color:reset} %{message}`,
+	)
+	logging.SetFormatter(format)
+	log := logging.MustGetLogger("log")
+	log.Info("*** Autogram Release 8 ***")
+	log.Info("Running...")
 
 	app := cli.NewApp()
 	app.Name = "Autogram"
@@ -201,72 +304,6 @@ func main() {
 			Destination: &confpath,
 		},
 	}
-
-	app.Action = func(c *cli.Context) error {
-		config.GetFromFile(confpath)
-		subscribers = set.I64{}
-		for _, sub := range config.Subscribers {
-			subscribers.Put(sub)
-		}
-
-		bot, err := telegram.NewBotAPI(config.ApiKey)
-		panicOnError(err)
-		bot.Debug = true
-
-		updatecfg := telegram.UpdateConfig{}
-		updatecfg.Timeout = 60
-		tgch, err := bot.GetUpdatesChan(updatecfg)
-		panicOnError(err)
-
-		irc := irc.QAIrc(config.IrcNickname, config.IrcRealname)
-		irc.Address = config.IrcServer
-		irc.UseTLS = true
-		irc.TLSCfg = &tls.Config{InsecureSkipVerify: true}
-
-		err = irc.Run()
-		panicOnError(err)
-
-		cache := cacher.New(func(id string) cacher.Entry {
-			npic, err := getFileByID(*bot, id)
-			panicOnError(err)
-			return cacher.Entry{id, *npic}
-		})
-
-		r := mux.NewRouter()
-		r.HandleFunc("/autogramimg/{id}", func(rw http.ResponseWriter, rq *http.Request) {
-			vars := mux.Vars(rq)
-
-			if vars["id"] == "favicon.ico" {
-				return
-			}
-			cacherq := cacher.EntryRq{
-				vars["id"],
-				make(chan cacher.Entry),
-			}
-			cache.RqCh <- cacherq
-			rw.Write((<-cacherq.Response).Load.(File).data)
-		})
-
-		go func() {
-			err = http.ListenAndServe(config.HttpListen, r)
-			if err != nil {
-				fmt.Println(err.Error())
-			}
-		}()
-
-		for {
-			select {
-			case msg, state := <-irc.Out:
-				if !state {
-					fmt.Println("Reconnect")
-					irc.Reconnect()
-				}
-				ProcessIRCMsg(bot, irc, msg)
-
-			case tgin := <-tgch:
-				ProcessTGMsg(bot, irc, tgin, cache.AddCh)
-			}
-		}
-	}
+	app.Action = bot
 	app.Run(os.Args)
 }

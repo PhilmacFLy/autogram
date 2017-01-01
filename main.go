@@ -4,7 +4,6 @@ import (
 	"autogram-next/set"
 	"cacher"
 	"crypto/tls"
-	"encoding/json"
 	"github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/gorilla/mux"
 	"github.com/op/go-logging"
@@ -14,41 +13,18 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"strings"
+	"autogram-next/misc"
 )
 
 var (
 	telegram    *tgbotapi.BotAPI
 	irc         *qairc.Engine
-	confpath    string
-	config      Settings
+	confpath string
+	config misc.Settings
 	subscribers set.I64
-	log         logging.Logger
+	log logging.Logger
 )
-
-type Settings struct {
-	ApiKey           string
-	IrcServer        string
-	IrcTLS           bool
-	IrcChannel       string
-	IrcNickname      string
-	IrcRealname      string
-	HttpServerString string
-	HttpListen       string
-	Subscribers      []int64
-}
-
-func (s *Settings) GetFromFile(path string) {
-	confb, err := ioutil.ReadFile(path)
-	panicOnError(err)
-	err = json.Unmarshal(confb, &s)
-	panicOnError(err)
-}
-
-func (s *Settings) SaveToJSONFile(path string) {
-	confb, err := json.Marshal(s)
-	panicOnError(err)
-	err = ioutil.WriteFile(path, confb, os.FileMode(0600))
-}
 
 type File struct {
 	id   string
@@ -74,25 +50,12 @@ func getPhoto(photos []tgbotapi.PhotoSize) (*File, error) {
 	return getFileByID(maxphoto.FileID)
 }
 
-func downloadFile(url string) ([]byte, error) {
-	response, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	contents, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		return nil, err
-	}
-	return contents, nil
-}
-
 func getFileByID(id string) (*File, error) {
 	url, err := telegram.GetFileDirectURL(id)
 	if err != nil {
 		return nil, err
 	}
-	content, err := downloadFile(url)
+	content, err := misc.DownloadFile(url)
 	if err != nil {
 		return nil, err
 	}
@@ -136,14 +99,15 @@ func processTGMsg(update tgbotapi.Update) {
 	case (update.EditedMessage) != nil:
 		msg = *update.EditedMessage
 		edt = " (*edit*)"
-
 	}
 
 	if update.Message != nil && (msg.Text == "/start" || msg.Text == "/stop") {
 		switch {
 		case msg.Text == "/start":
+			log.Info("Subscription starting ", msg.Chat.ID)
 			subscribers.Put(int64(msg.Chat.ID))
 		case msg.Text == "/stop":
+			log.Info("Subscription ending ", msg.Chat.ID)
 			subscribers.Remove(int64(msg.Chat.ID))
 		}
 		config.Subscribers = subscribers.Get()
@@ -154,13 +118,13 @@ func processTGMsg(update tgbotapi.Update) {
 	id, ok := processResource(msg)
 
 	if ok {
-		irc.Privmsg(config.IrcChannel, msg.From.UserName+": "+edt+config.HttpServerString+id)
+		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + edt + config.HttpServerString + id)
 	} else {
-		irc.Privmsg(config.IrcChannel, msg.From.UserName+": "+edt+msg.Text)
+		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + edt + msg.Text)
 	}
 
 	for _, subid := range subscribers.Get() {
-		if subid != int64(msg.From.ID) {
+		if subid != int64(msg.From.ID) && subid != int64(msg.Chat.ID) {
 			_, err := telegram.Send(
 				tgbotapi.NewForward(
 					subid,
@@ -169,11 +133,12 @@ func processTGMsg(update tgbotapi.Update) {
 				),
 			)
 			if err != nil {
+				log.Error(err.Error())
 				reflectid := int64(msg.Chat.ID)
 				telegram.Send(
 					tgbotapi.NewMessage(
 						int64(reflectid),
-						"Error: "+err.Error(),
+						"Error: " + err.Error(),
 					),
 				)
 			}
@@ -183,6 +148,7 @@ func processTGMsg(update tgbotapi.Update) {
 
 func panicOnError(err error) {
 	if err != nil {
+		log.Error(err.Error())
 		panic(err)
 	}
 }
@@ -194,7 +160,6 @@ func tgannounce(msg string) {
 }
 
 func bot(c *cli.Context) error {
-	c
 	config.GetFromFile(confpath)
 	subscribers = set.I64{}
 	for _, sub := range config.Subscribers {
@@ -217,7 +182,7 @@ func bot(c *cli.Context) error {
 	err = irc.Run()
 	panicOnError(err)
 
-	cache := cacher.New(100*1024*1024, func(id string) (cacher.Entry, bool) {
+	cache := cacher.New(100 * 1024 * 1024, func(id string) (cacher.Entry, bool) {
 		log.Info("Cache miss:", "item id", id)
 		npic, err := getFileByID(id)
 		if err != nil {
@@ -228,6 +193,7 @@ func bot(c *cli.Context) error {
 		log.Info("Cache miss:", "item id", id, "backend retrieval successful")
 		return *npic, true
 	})
+	cache.Run()
 
 	r := mux.NewRouter()
 	r.HandleFunc("/autogramimg/{id}", func(rw http.ResponseWriter, rq *http.Request) {
@@ -239,12 +205,8 @@ func bot(c *cli.Context) error {
 			return
 		}
 		log.Info("Cache request:", "item id", vars["id"])
-		cacherq := cacher.EntryRq{
-			vars["id"],
-			make(chan cacher.Entry),
-		}
-		cache.RqCh <- cacherq
-		rw.Write((<-cacherq.Response).(File).data)
+		item := <-cache.Request(vars["id"])
+		rw.Write(item.(File).data)
 	})
 
 	go func() {
@@ -258,7 +220,13 @@ func bot(c *cli.Context) error {
 	tgannounce("PSA: Autogram aktiv!")
 
 	for {
+		countdown := time.After(time.Minute * 60)
 		select {
+		case <-countdown:
+			stats := <-cache.Stats()
+			log.Info("Cache Limit:  ", stats.Limit)
+			log.Info("Cache Weight: ", stats.Weight)
+			log.Info("Cache Countt: ", stats.Count)
 		case msg, state := <-irc.Out:
 			if !state {
 				log.Warning("IRC reconnect triggered")
@@ -272,10 +240,24 @@ func bot(c *cli.Context) error {
 				for _, subid := range subscribers.Get() {
 					msgtext, _ := msg.GetPrivmsg()
 					_, err := telegram.Send(
-						tgbotapi.NewMessage(int64(subid), msg.Sender.Nick+": "+msgtext),
+						tgbotapi.NewMessage(int64(subid), msg.Sender.Nick + ": " + msgtext),
 					)
 					if err != nil {
-						irc.Privmsg(config.IrcChannel, "Error: "+err.Error())
+						log.Error(err.Error())
+						irc.Privmsg(config.IrcChannel, "Error: " + err.Error())
+					}
+				}
+			case msg.IsCTCP():
+				ctcptext := strings.Trim(msg.Args[len(msg.Args) - 1], "\x01\r\n")
+				if strings.HasPrefix(ctcptext, "ACTION") {
+					for _, subid := range subscribers.Get() {
+						_, err := telegram.Send(
+							tgbotapi.NewMessage(int64(subid), "* " + msg.Sender.Nick + " " + ctcptext[7:]),
+						)
+						if err != nil {
+							log.Error(err.Error())
+							irc.Privmsg(config.IrcChannel, "Error: " + err.Error())
+						}
 					}
 				}
 			}
@@ -292,7 +274,7 @@ func main() {
 	)
 	logging.SetFormatter(format)
 	log := logging.MustGetLogger("log")
-	log.Info("*** Autogram Release 8 ***")
+	log.Info("*** Autogram Release 10 ***")
 	log.Info("Running...")
 
 	app := cli.NewApp()

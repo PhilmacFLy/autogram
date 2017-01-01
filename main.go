@@ -67,8 +67,10 @@ func getFileByID(id string) (*File, error) {
 }
 
 func processResource(msg tgbotapi.Message) (string, bool) {
-	var file *File
-	var err error
+	var (
+		file *File
+		err error
+	)
 	switch {
 	case msg.Photo != nil:
 		file, err = getPhoto(*msg.Photo)
@@ -81,12 +83,24 @@ func processResource(msg tgbotapi.Message) (string, bool) {
 	default:
 		return "", false
 	}
-	panicOnError(err)
+	fatal(err)
 	return file.id, true
 }
 
-func processTGMsg(update tgbotapi.Update) {
+func processTGCmdMsg(cmd tgbotapi.Message) {
+	switch {
+	case cmd.Text == "/start":
+		log.Info("Subscription starting ", cmd.Chat.ID)
+		subscribers.Put(int64(cmd.Chat.ID))
+	case cmd.Text == "/stop":
+		log.Info("Subscription ending ", cmd.Chat.ID)
+		subscribers.Remove(int64(cmd.Chat.ID))
+	}
+	config.Subscribers = subscribers.Get()
+	config.SaveToJSONFile(confpath)
+}
 
+func processTGMsg(update tgbotapi.Update) {
 	var (
 		msg tgbotapi.Message
 		edt string
@@ -98,64 +112,44 @@ func processTGMsg(update tgbotapi.Update) {
 		edt = ""
 	case (update.EditedMessage) != nil:
 		msg = *update.EditedMessage
-		edt = " (*edit*)"
+		edt = "(*edit*) "
 	}
 
-	if update.Message != nil && (msg.Text == "/start" || msg.Text == "/stop") {
-		switch {
-		case msg.Text == "/start":
-			log.Info("Subscription starting ", msg.Chat.ID)
-			subscribers.Put(int64(msg.Chat.ID))
-		case msg.Text == "/stop":
-			log.Info("Subscription ending ", msg.Chat.ID)
-			subscribers.Remove(int64(msg.Chat.ID))
-		}
-		config.Subscribers = subscribers.Get()
-		config.SaveToJSONFile(confpath)
+	if update.Message != nil && strings.HasPrefix(msg.Text, "/") {
+		processTGCmdMsg(*update.Message)
 		return
 	}
 
 	id, ok := processResource(msg)
-
 	if ok {
 		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + edt + config.HttpServerString + id)
 	} else {
-		irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + edt + msg.Text)
-	}
 
-	for _, subid := range subscribers.Get() {
-		if subid != int64(msg.From.ID) && subid != int64(msg.Chat.ID) {
-			_, err := telegram.Send(
-				tgbotapi.NewForward(
-					subid,
-					int64(msg.Chat.ID),
-					msg.MessageID,
-				),
-			)
-			if err != nil {
-				log.Error(err.Error())
-				reflectid := int64(msg.Chat.ID)
-				telegram.Send(
-					tgbotapi.NewMessage(
-						int64(reflectid),
-						"Error: " + err.Error(),
-					),
-				)
-			}
+		for _, singlemsg := range strings.Split(msg.Text, "\n") {
+			irc.Privmsg(config.IrcChannel, msg.From.UserName + ": " + edt + singlemsg)
 		}
 	}
-}
 
-func panicOnError(err error) {
-	if err != nil {
-		log.Error(err.Error())
-		panic(err)
+	for _, subid := range subscribers.Filtered(func(id int64) bool {
+		return id != int64(msg.From.ID) && id != int64(msg.Chat.ID)
+	}) {
+		_, err := telegram.Send(
+			tgbotapi.NewForward(subid, int64(msg.Chat.ID), msg.MessageID),
+		)
+		warning(err, func() {
+			reflectid := int64(msg.Chat.ID)
+			telegram.Send(
+				tgbotapi.NewMessage(int64(reflectid), "Error: " + err.Error()),
+			)
+		})
 	}
 }
 
-func tgannounce(msg string) {
+func tgAnnounceLn(msgs ...string) {
 	for _, subid := range subscribers.Get() {
-		telegram.Send(tgbotapi.NewMessage(subid, msg))
+		for _, msg := range msgs {
+			telegram.Send(tgbotapi.NewMessage(subid, msg))
+		}
 	}
 }
 
@@ -168,25 +162,25 @@ func bot(c *cli.Context) error {
 
 	var err error
 	telegram, err = tgbotapi.NewBotAPI(config.ApiKey)
-	panicOnError(err)
+	fatal(err)
 
 	updatecfg := tgbotapi.UpdateConfig{}
 	updatecfg.Timeout = 60
 	tgch, err := telegram.GetUpdatesChan(updatecfg)
-	panicOnError(err)
+	fatal(err)
 
 	irc = qairc.QAIrc(config.IrcNickname, config.IrcRealname)
 	irc.Address = config.IrcServer
 	irc.UseTLS = config.IrcTLS
 	irc.TLSCfg = &tls.Config{InsecureSkipVerify: true}
 	err = irc.Run()
-	panicOnError(err)
+	fatal(err)
 
 	cache := cacher.New(100 * 1024 * 1024, func(id string) (cacher.Entry, bool) {
 		log.Info("Cache miss:", "item id", id)
 		npic, err := getFileByID(id)
 		if err != nil {
-			log.Warning("Cache miss:", "item id", id, "backend retrieval unsuccessful")
+			log.Info("Cache miss:", "item id", id, "backend retrieval unsuccessful")
 			data, _ := ioutil.ReadFile("giphy.gif")
 			return File{id: id, size: len(data), data: data}, false
 		}
@@ -197,10 +191,8 @@ func bot(c *cli.Context) error {
 
 	r := mux.NewRouter()
 	r.HandleFunc("/autogramimg/{id}", func(rw http.ResponseWriter, rq *http.Request) {
-
 		log.Info("Http request:", rq.RemoteAddr, rq.RequestURI)
 		vars := mux.Vars(rq)
-
 		if vars["id"] == "favicon.ico" {
 			return
 		}
@@ -216,17 +208,10 @@ func bot(c *cli.Context) error {
 		}
 	}()
 
-	tgannounce("PSA: " + time.Now().String())
-	tgannounce("PSA: Autogram aktiv!")
+	tgAnnounceLn("🤖 " + time.Now().String(), "🤖 Autogram aktiv!")
 
 	for {
-		countdown := time.After(time.Minute * 60)
 		select {
-		case <-countdown:
-			stats := <-cache.Stats()
-			log.Info("Cache Limit:  ", stats.Limit)
-			log.Info("Cache Weight: ", stats.Weight)
-			log.Info("Cache Countt: ", stats.Count)
 		case msg, state := <-irc.Out:
 			if !state {
 				log.Warning("IRC reconnect triggered")
@@ -237,15 +222,14 @@ func bot(c *cli.Context) error {
 				log.Info("Joining " + config.IrcChannel + " on " + config.IrcServer)
 				irc.Join(config.IrcChannel)
 			case msg.IsPrivmsg() && msg.GetChannel() == config.IrcChannel:
+				text, _ := msg.GetPrivmsg()
 				for _, subid := range subscribers.Get() {
-					msgtext, _ := msg.GetPrivmsg()
 					_, err := telegram.Send(
-						tgbotapi.NewMessage(int64(subid), msg.Sender.Nick + ": " + msgtext),
+						tgbotapi.NewMessage(int64(subid), msg.Sender.Nick + ": " + text),
 					)
-					if err != nil {
-						log.Error(err.Error())
+					warning(err, func() {
 						irc.Privmsg(config.IrcChannel, "Error: " + err.Error())
-					}
+					})
 				}
 			case msg.IsCTCP():
 				ctcptext := strings.Trim(msg.Args[len(msg.Args) - 1], "\x01\r\n")
@@ -254,17 +238,31 @@ func bot(c *cli.Context) error {
 						_, err := telegram.Send(
 							tgbotapi.NewMessage(int64(subid), "* " + msg.Sender.Nick + " " + ctcptext[7:]),
 						)
-						if err != nil {
-							log.Error(err.Error())
+						warning(err, func() {
 							irc.Privmsg(config.IrcChannel, "Error: " + err.Error())
-						}
+						})
 					}
 				}
+			default:
+				log.Info(msg.Raw)
 			}
-
 		case tgin := <-tgch:
 			processTGMsg(tgin)
 		}
+	}
+}
+
+func fatal(err error) {
+	if err != nil {
+		log.Error(err.Error())
+		panic(err)
+	}
+}
+
+func warning(err error, f func()) {
+	if err != nil {
+		log.Warning(err.Error())
+		f()
 	}
 }
 
@@ -274,7 +272,7 @@ func main() {
 	)
 	logging.SetFormatter(format)
 	log := logging.MustGetLogger("log")
-	log.Info("*** Autogram Release 10 ***")
+	log.Info("*** Autogram Release 11 ***")
 	log.Info("Running...")
 
 	app := cli.NewApp()

@@ -17,6 +17,16 @@ func (s *I64) Remove(i int64) {
 	delete(*s, i)
 }
 
+func (s *I64) Filtered(f func(int64) bool) []int64 {
+	keys := make([]int64, 0)
+	for k := range *s {
+		if f(k) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
 func (s *I64) Get() []int64 {
 	keys := make([]int64, 0)
 	for k := range *s {

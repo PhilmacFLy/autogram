@@ -50,3 +50,4 @@ func DownloadFile(url string) ([]byte, error) {
 	}
 	return contents, nil
 }
+

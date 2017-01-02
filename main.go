@@ -2,7 +2,7 @@ package main
 
 import (
 	"autogram-next/set"
-	"cacher"
+	"github.com/aimless/cacher"
 	"crypto/tls"
 	"github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/gorilla/mux"

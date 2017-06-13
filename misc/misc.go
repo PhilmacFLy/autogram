@@ -38,6 +38,30 @@ func (s *Settings) SaveToJSONFile(path string) {
 	err = ioutil.WriteFile(path, confb, os.FileMode(0600))
 }
 
+func NewFile(id string, data []byte) *File {
+	return &File{
+		id: id,
+		data: data,
+	}
+}
+
+type File struct {
+	id   string
+	data []byte
+}
+
+func (f File) ID() string {
+	return f.id
+}
+
+func (f File) Score() int {
+	return len(f.data)
+}
+
+func (f File) Data() []byte {
+	return f.data
+}
+
 func DownloadFile(url string) ([]byte, error) {
 	response, err := http.Get(url)
 	if err != nil {

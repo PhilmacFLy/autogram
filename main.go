@@ -1,34 +1,35 @@
 package main
 
 import (
-	"autogram-next/misc"
-	"autogram-next/set"
-	"autogram-next/telegram"
 	"crypto/tls"
-	"github.com/aimless/cacher"
-	"github.com/go-telegram-bot-api/telegram-bot-api"
-	"github.com/gorilla/mux"
-	"github.com/op/go-logging"
-	"github.com/quiteawful/qairc"
-	"github.com/urfave/cli"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-	"autogram-next/protocolator"
+
+	"github.com/aimless/cacher"
+	"github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/gorilla/mux"
+	"github.com/op/go-logging"
+	"github.com/philmacfly/autogram/misc"
+	"github.com/philmacfly/autogram/protocolator"
+	"github.com/philmacfly/autogram/set"
+	"github.com/philmacfly/autogram/telegram"
+	"github.com/quiteawful/qairc"
+	"github.com/urfave/cli"
 )
 
 var (
 	tg          *tgbotapi.BotAPI
-	helper telegram.Helper
+	helper      telegram.Helper
 	irc         *qairc.Engine
-	cache cacher.Cacher
-	confpath string
-	config misc.Settings
+	cache       cacher.Cacher
+	confpath    string
+	config      misc.Settings
 	subscribers set.I64
-	log logging.Logger
-	prot *protocolator.Protocolator
+	log         logging.Logger
+	prot        *protocolator.Protocolator
 )
 
 func processTGCmdMsg(cmd tgbotapi.Message) {
@@ -48,10 +49,9 @@ func getUrlForID(id string) string {
 	return config.HttpServerString + id
 }
 
-
 func processTGMsg(update tgbotapi.Update) {
 	var (
-		msg tgbotapi.Message
+		msg    tgbotapi.Message
 		prefix string
 	)
 
@@ -67,11 +67,11 @@ func processTGMsg(update tgbotapi.Update) {
 		id, ok := helper.ExtractResourceID(m)
 		if ok {
 			prot.Log("TG", m.From.UserName, ":", getUrlForID(id))
-			irc.Privmsg(config.IrcChannel, p + m.From.UserName + ": " + getUrlForID(id))
+			irc.Privmsg(config.IrcChannel, p+m.From.UserName+": "+getUrlForID(id))
 		} else {
 			prot.Log("TG", m.From.UserName, ":", m.Text)
 			for _, singlemsg := range strings.Split(m.Text, "\n") {
-				irc.Privmsg(config.IrcChannel, p + m.From.UserName + ": " + singlemsg)
+				irc.Privmsg(config.IrcChannel, p+m.From.UserName+": "+singlemsg)
 			}
 		}
 
@@ -84,7 +84,7 @@ func processTGMsg(update tgbotapi.Update) {
 			warning(err, func() {
 				reflectid := int64(m.Chat.ID)
 				tg.Send(
-					tgbotapi.NewMessage(int64(reflectid), "Error: " + err.Error()),
+					tgbotapi.NewMessage(int64(reflectid), "Error: "+err.Error()),
 				)
 			})
 		}
@@ -141,7 +141,7 @@ func bot(c *cli.Context) error {
 	err = irc.Run()
 	fatal(err)
 
-	cache = cacher.New(100 * 1024 * 1024, func(id string) (cacher.Entry, bool) {
+	cache = cacher.New(100*1024*1024, func(id string) (cacher.Entry, bool) {
 		log.Info("Cache miss:", "item id", id)
 		npic, err := helper.DownloadFileByID(id)
 		if err != nil {
@@ -175,7 +175,7 @@ func bot(c *cli.Context) error {
 		}
 	}()
 
-	tgAnnounceLn("🤖 " + time.Now().String(), "🤖 Autogram aktiv!")
+	tgAnnounceLn("🤖 "+time.Now().String(), "🤖 Autogram aktiv!")
 	tgAnnounceLn("🤖 " + "CALLS MAY BE RECORDED FOR TRAINING AND QUALITY PURPOSES")
 
 	for {
@@ -194,10 +194,10 @@ func bot(c *cli.Context) error {
 				prot.Log("IRC", msg.Sender.Nick, ":", text)
 				for _, subid := range subscribers.Get() {
 					_, err := tg.Send(
-						tgbotapi.NewMessage(int64(subid), msg.Sender.Nick + ": " + text),
+						tgbotapi.NewMessage(int64(subid), msg.Sender.Nick+": "+text),
 					)
 					warning(err, func() {
-						irc.Privmsg(config.IrcChannel, "Error: " + err.Error())
+						irc.Privmsg(config.IrcChannel, "Error: "+err.Error())
 					})
 				}
 			case msg.Type == "JOIN":
@@ -207,14 +207,14 @@ func bot(c *cli.Context) error {
 			case msg.Type == "QUIT":
 				tgAnnounceLn("🤖 " + msg.Sender.Nick + " has quit")
 			case msg.IsCTCP():
-				ctcptext := strings.Trim(msg.Args[len(msg.Args) - 1], "\x01\r\n")
+				ctcptext := strings.Trim(msg.Args[len(msg.Args)-1], "\x01\r\n")
 				if strings.HasPrefix(ctcptext, "ACTION") {
 					for _, subid := range subscribers.Get() {
 						_, err := tg.Send(
-							tgbotapi.NewMessage(int64(subid), "* " + msg.Sender.Nick + " " + ctcptext[7:]),
+							tgbotapi.NewMessage(int64(subid), "* "+msg.Sender.Nick+" "+ctcptext[7:]),
 						)
 						warning(err, func() {
-							irc.Privmsg(config.IrcChannel, "Error: " + err.Error())
+							irc.Privmsg(config.IrcChannel, "Error: "+err.Error())
 						})
 					}
 				}

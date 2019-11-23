@@ -1,8 +1,8 @@
 package telegram
 
 import (
-	"autogram-next/misc"
-	"github.com/go-telegram-bot-api/telegram-bot-api"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/philmacfly/autogram/misc"
 )
 
 type Helper struct {
@@ -28,12 +28,12 @@ func (h *Helper) DownloadFileByID(id string) (*misc.File, error) {
 func (h *Helper) ExtractResourceID(msg tgbotapi.Message) (string, bool) {
 	var (
 		file *misc.File
-		err error
+		err  error
 	)
 	switch {
 	case msg.Photo != nil:
 		maxphoto := (*msg.Photo)[0]
-		for _, photo := range (*msg.Photo) {
+		for _, photo := range *msg.Photo {
 			if maxphoto.FileSize < photo.FileSize {
 				maxphoto = photo
 			}

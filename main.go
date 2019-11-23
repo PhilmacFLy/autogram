@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aimless/cacher"
-	"github.com/go-telegram-bot-api/telegram-bot-api"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/gorilla/mux"
 	"github.com/op/go-logging"
+	"github.com/philmacfly/autogram/cacher"
 	"github.com/philmacfly/autogram/misc"
 	"github.com/philmacfly/autogram/protocolator"
 	"github.com/philmacfly/autogram/set"
@@ -253,7 +253,7 @@ func main() {
 	app := cli.NewApp()
 	app.Name = "Autogram"
 	app.Flags = []cli.Flag{
-		cli.StringFlag{
+		&cli.StringFlag{
 			Name:        "config, c",
 			Usage:       "Work with configuration from `FILE`",
 			Destination: &confpath,
